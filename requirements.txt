@@ -1,0 +1,5 @@
+# Requirements for the data_drift_solutions project
+pandas
+numpy
+scikit-learn
+PyTorch>=1.12

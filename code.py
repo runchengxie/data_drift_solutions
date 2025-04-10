@@ -1,5 +1,17 @@
+"""
+这里提供一个完整的管线，用于基于因子的股票预测和指数增强回测。包括以下部分：
+1) 超参数与数据范围的配置。
+2) 数据加载和特征计算（示例性占位实现）。
+3) 使用排名或标准化方法对数据进行预处理。
+4) 适用于时间序列输入的自定义 PyTorch 数据集类。
+5) 包含市场门控、特征提取和最终预测的 PyTorch 模型组件。
+6) 使用自定义 Rank IC 损失来进行因子建模的训练流程。
+7) 因子综合以及简化的回测框架。
+
+可根据项目需求进一步扩展或替换此处的占位功能（如数据加载），以在生产环境中使用。
+"""
 # ----------------------------------------------------------------------------
-# --- 0. Setup & Imports ---
+# --- 0. 设置与导入 ---
 # ----------------------------------------------------------------------------
 import pandas as pd
 import numpy as np
@@ -8,90 +20,90 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, Dataset
 from sklearn.preprocessing import StandardScaler, QuantileTransformer
-from sklearn.model_selection import train_test_split # Or time-series split
+from sklearn.model_selection import train_test_split # 或时间序列分割
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import gc # Garbage collection
+import gc # 垃圾回收
 
-# Placeholder for feature calculation library (like qlib or custom)
+# 占位符：特征计算库（例如 qlib 或自定义实现）
 # from feature_calculator import calculate_alpha158, calculate_moneyflow93, calculate_fundamental64
 
-# Placeholder for backtesting library
+# 占位符：回测库
 # from backtester import Backtester, PortfolioOptimizer
 
-print(f"PyTorch version: {torch.__version__}")
+print(f"PyTorch 版本: {torch.__version__}")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+print(f"使用设备: {device}")
 
 # ----------------------------------------------------------------------------
-# --- 1. Configuration ---
+# --- 1. 配置 ---
 # ----------------------------------------------------------------------------
 CONFIG = {
-    # --- Data & Time ---
-    "start_date": "2015-01-01", # Data start date (need history for features)
-    "train_start_date": "2016-12-30", # As per report backtest start
-    "train_end_date": "2023-12-31", # Example train end
+    # --- 数据与时间 ---
+    "start_date": "2015-01-01", # 数据起始日期（需要历史数据以计算特征）
+    "train_start_date": "2016-12-30", # 按报告回测起始日期
+    "train_end_date": "2023-12-31", # 示例训练结束日期
     "test_start_date": "2024-01-01",
-    "test_end_date": "2025-01-27", # As per report backtest end
-    "rolling_window_years": 8, # Example: Use 8 years data for training each period
-    "prediction_horizon": 10, # Predict T+10 return
-    "market_index_codes": ["000300.SH", "000905.SH", "000852.SH", "000985.CSI"], # HS300, CSI500, CSI1000, All-Share
-    "target_index_code": "000852.SH", # CSI 1000 for enhancement
-    "stock_universe_source": "000985.CSI", # Use CSI All-Share constituents as pool
+    "test_end_date": "2025-01-27", # 按报告回测结束日期
+    "rolling_window_years": 8, # 示例：每期使用8年数据进行训练
+    "prediction_horizon": 10, # 预测 T+10 收益
+    "market_index_codes": ["000300.SH", "000905.SH", "000852.SH", "000985.CSI"], # HS300, CSI500, CSI1000, 全市场
+    "target_index_code": "000852.SH", # CSI 1000 用于增强
+    "stock_universe_source": "000985.CSI", # 使用 CSI 全市场成分股作为池
 
-    # --- Features ---
-    "feature_sets": ["alpha158", "moneyflow93", "fundamental64"], # Choose which base features to use
-    "market_feature_lookback": [5, 10, 20, 30, 60], # Lookback days for market features
+    # --- 特征 ---
+    "feature_sets": ["alpha158", "moneyflow93", "fundamental64"], # 选择使用的基础特征
+    "market_feature_lookback": [5, 10, 20, 30, 60], # 市场特征的回溯天数
     "use_market_gating": True,
-    "gating_type": "attention", # 'linear' or 'attention'
-    "gating_beta": 3.0, # Softmax temperature for linear gating (report found 1-3 optimal)
+    "gating_type": "attention", # 'linear' 或 'attention'
+    "gating_beta": 3.0, # 线性门控的 Softmax 温度（报告发现1-3最优）
 
-    # --- Model ---
-    "feature_extractor_type": "attention", # 'gru' or 'attention' (Master's 3-layer attention)
-    "d_model": 64, # Model dimension
-    "n_heads": 4, # Number of attention heads
-    "num_gru_layers": 2, # For GRU extractor
-    "num_attention_layers": 3, # For Master-like attention extractor
+    # --- 模型 ---
+    "feature_extractor_type": "attention", # 'gru' 或 'attention'（硕士论文的三层注意力）
+    "d_model": 64, # 模型维度
+    "n_heads": 4, # 注意力头数
+    "num_gru_layers": 2, # GRU 提取器的层数
+    "num_attention_layers": 3, # 硕士论文的注意力提取器层数
     "dropout_rate": 0.1,
-    "time_series_length": 10, # Input sequence length (T) for stock features
+    "time_series_length": 10, # 股票特征的输入序列长度 (T)
 
-    # --- Training ---
-    "batch_size": 1024, # Adjust based on GPU memory
+    # --- 训练 ---
+    "batch_size": 1024, # 根据 GPU 内存调整
     "learning_rate": 1e-3,
-    "weight_decay": 1e-4, # AdamW weight decay
-    "epochs": 50, # Max epochs
-    "early_stopping_patience": 10, # Stop if validation loss doesn't improve
+    "weight_decay": 1e-4, # AdamW 权重衰减
+    "epochs": 50, # 最大训练轮数
+    "early_stopping_patience": 10, # 如果验证损失没有改善则停止
 
-    # --- Factor Synthesis ---
-    "synthesis_weights": "equal", # 'equal' or potentially 'ml_based' in future
-    "base_ai_factors": ["pv1", "pv5", "pv20"], # From report's reference model
+    # --- 因子综合 ---
+    "synthesis_weights": "equal", # 'equal' 或未来可能的 'ml_based'
+    "base_ai_factors": ["pv1", "pv5", "pv20"], # 来自报告的参考模型
 
-    # --- Backtesting ---
-    "rebalance_freq": "W", # Weekly rebalancing
-    "commission_rate": 0.0003, # Transaction cost (3bps)
-    "vwap_execution": True, # Assume VWAP execution (as per report)
-    "turnover_limit": 0.20, # Max one-way turnover per rebalance (20%)
-    "optimizer_constraints": { # As per report
-        "min_in_universe_weight": 0.80, # Min 80% weight in target index constituents
-        "industry_deviation": 0.02, # Max +/- 2% industry deviation vs benchmark
-        "style_deviation": { # Max +/- 0.3 style factor exposure deviation (Size, NLS)
+    # --- 回测 ---
+    "rebalance_freq": "W", # 每周再平衡
+    "commission_rate": 0.0003, # 交易成本（3bps）
+    "vwap_execution": True, # 假设 VWAP 执行（按报告）
+    "turnover_limit": 0.20, # 每次再平衡的最大单向换手率（20%）
+    "optimizer_constraints": { # 按报告
+        "min_in_universe_weight": 0.80, # 目标指数成分股的最小权重为80%
+        "industry_deviation": 0.02, # 行业偏离最大 +/- 2%（相对于基准）
+        "style_deviation": { # 风格因子暴露偏离最大 +/- 0.3（大小，非线性大小）
             "size": 0.3,
-            "nls": 0.3, # Non-linear size placeholder
+            "nls": 0.3, # 非线性大小占位符
         },
-        "max_stock_weight": 0.015, # Example max single stock weight (not explicitly mentioned but common)
-        "max_stock_deviation": 0.01 # Example max deviation from benchmark weight
+        "max_stock_weight": 0.015, # 示例单只股票最大权重（未明确提及但常见）
+        "max_stock_deviation": 0.01 # 示例相对于基准权重的最大偏离
     }
 }
 
 # ----------------------------------------------------------------------------
-# --- 2. Data Loading ---
+# --- 2. 数据加载 ---
 # ----------------------------------------------------------------------------
 def load_stock_data(start_date, end_date, universe_code):
-    """Loads daily stock OHLCV, index constituents, etc."""
-    print(f"Loading stock data from {start_date} to {end_date} for {universe_code}...")
-    # TODO: Implement actual data loading from Wind, Tushare, JoinQuant, local DB, etc.
-    # Needs: OHLCV, market cap, industry classification, index constituents, adj factor
-    # Returns a multi-index DataFrame (date, asset)
+    """加载每日股票 OHLCV、指数成分股等数据。"""
+    print(f"加载股票数据，从 {start_date} 到 {end_date}，股票池为 {universe_code}...")
+    # TODO: 实现实际数据加载（如 Wind、Tushare、JoinQuant、本地数据库等）
+    # 需要：OHLCV、市值、行业分类、指数成分股、复权因子
+    # 返回一个多索引 DataFrame（日期，资产）
     dummy_dates = pd.date_range(start_date, end_date)
     dummy_assets = [f"stock_{i:03d}.SZ" for i in range(5)]
     dummy_index = pd.MultiIndex.from_product([dummy_dates, dummy_assets], names=['date', 'asset'])
@@ -99,38 +111,38 @@ def load_stock_data(start_date, end_date, universe_code):
     for col in ['open', 'high', 'low', 'close', 'volume', 'amount', 'market_cap', 'industry']:
         dummy_data[col] = np.random.rand(len(dummy_index))
     dummy_data['adj_factor'] = 1.0
-    dummy_data['is_constituent'] = True # Assume all are constituents for placeholder
-    print("Stock data loaded (placeholder).")
+    dummy_data['is_constituent'] = True # 假设所有股票都是成分股（占位实现）
+    print("股票数据加载完成（占位实现）。")
     return dummy_data
 
 def load_market_features(index_codes, start_date, end_date, lookbacks):
-    """Calculates and loads market features based on index OHLCV."""
-    print("Loading market features...")
+    """基于指数 OHLCV 计算并加载市场特征。"""
+    print("加载市场特征...")
     market_features = {}
-    # TODO: Load actual index OHLCV data
+    # TODO: 加载实际指数 OHLCV 数据
     for index_code in index_codes:
-         # Calculate features like MR, MRAVG(d), MRSTD(d), MAAVG(d), MASTD(d) for d in lookbacks
-         # This should return a DataFrame indexed by date
+         # 计算特征如 MR, MRAVG(d), MRSTD(d), MAAVG(d), MASTD(d) 等，d 为回溯天数
+         # 返回一个以日期为索引的 DataFrame
         dummy_dates = pd.date_range(start_date, end_date)
-        num_features = 1 + len(lookbacks) * 4 # MR + 4 types * num_lookbacks
+        num_features = 1 + len(lookbacks) * 4 # MR + 4种类型 * 回溯天数
         market_features[index_code] = pd.DataFrame(
             np.random.randn(len(dummy_dates), num_features),
             index=dummy_dates,
             columns=[f"mkt_feat_{i}" for i in range(num_features)]
         )
-    # Combine features from all indices (e.g., concatenate columns)
+    # 合并所有指数的特征（例如，列拼接）
     all_market_features = pd.concat(market_features.values(), axis=1)
-    print(f"Market features loaded (placeholder), shape: {all_market_features.shape}")
+    print(f"市场特征加载完成（占位实现），形状: {all_market_features.shape}")
     return all_market_features
 
 # ----------------------------------------------------------------------------
-# --- 3. Feature Engineering ---
+# --- 3. 特征工程 ---
 # ----------------------------------------------------------------------------
 def calculate_features(stock_data, feature_set_name):
-    """Calculates the specified feature set (Alpha158, MF93, Fund64)."""
-    print(f"Calculating feature set: {feature_set_name}...")
-    # TODO: Implement actual feature calculation using stock_data
-    # This is complex and often relies on libraries like qlib or custom implementations.
+    """计算指定的特征集（Alpha158, MF93, Fund64）。"""
+    print(f"计算特征集: {feature_set_name}...")
+    # TODO: 使用 stock_data 实现实际特征计算
+    # 这通常较复杂，通常依赖于库如 qlib 或自定义实现。
     if feature_set_name == "alpha158":
         num_features = 158
     elif feature_set_name == "moneyflow93":
@@ -138,86 +150,86 @@ def calculate_features(stock_data, feature_set_name):
     elif feature_set_name == "fundamental64":
         num_features = 64
     else:
-        raise ValueError("Unknown feature set")
+        raise ValueError("未知特征集")
 
     features = pd.DataFrame(
         np.random.randn(len(stock_data), num_features),
         index=stock_data.index,
         columns=[f"{feature_set_name}_{i}" for i in range(num_features)]
     )
-    print(f"{feature_set_name} features calculated (placeholder), shape: {features.shape}")
+    print(f"{feature_set_name} 特征计算完成（占位实现），形状: {features.shape}")
     return features
 
 def calculate_forward_returns(stock_data, horizon):
-    """Calculates forward adjusted returns."""
-    print(f"Calculating T+{horizon} forward returns...")
-    # TODO: Implement actual forward return calculation using adjusted close prices
+    """计算前瞻调整收益。"""
+    print(f"计算 T+{horizon} 前瞻收益...")
+    # TODO: 使用调整后的收盘价实现实际前瞻收益计算
     forward_returns = stock_data['close'].groupby(level='asset').pct_change(periods=-horizon).shift(horizon)
-    # Handle potential issues with adjusted prices if needed
-    print("Forward returns calculated (placeholder).")
+    # 如果需要，处理调整价格的潜在问题
+    print("前瞻收益计算完成（占位实现）。")
     return forward_returns.rename('target_return')
 
 # ----------------------------------------------------------------------------
-# --- 4. Data Preprocessing ---
+# --- 4. 数据预处理 ---
 # ----------------------------------------------------------------------------
 def preprocess_data(features, market_features, target_returns):
-    """Handles NaNs, normalization, standardization, etc."""
-    print("Preprocessing data...")
+    """在此函数中处理 NaN、归一化、标准化等操作。"""
+    print("数据预处理...")
     data = features.join(market_features, on='date').join(target_returns)
 
-    # --- Handle NaNs ---
-    # Option 1: Fill (e.g., with median, mean, zero) - careful about lookahead bias
-    # data = data.groupby(level='date').transform(lambda x: x.fillna(x.median())) # Cross-sectional median fill
-    # data = data.fillna(0) # Simple zero fill
+    # --- 处理 NaN ---
+    # 选项 1: 填充（例如，用中位数、均值、零） - 注意避免前瞻偏差
+    # data = data.groupby(level='date').transform(lambda x: x.fillna(x.median())) # 横截面中位数填充
+    # data = data.fillna(0) # 简单零填充
 
-    # Option 2: Drop stocks/dates with too many NaNs (or drop NaNs directly)
-    data = data.dropna() # Simplest approach, might lose data
+    # 选项 2: 删除含有过多 NaN 的股票/日期（或直接删除 NaN）
+    data = data.dropna() # 最简单的方法，可能会丢失数据
 
-    # --- Feature Scaling / Normalization ---
-    # Report mentions: Rank normalization, standardization, industry/market_cap neutralization
-    # Applying cross-sectional rank normalization is common for factors
-    # Applying time-series normalization (like RevIN mentioned in report survey) can help with drift
+    # --- 特征缩放 / 归一化 ---
+    # 报告提到：排名归一化、标准化、行业/市值中性化
+    # 应用横截面排名归一化是因子的常见做法
+    # 应用时间序列归一化（如报告调查中提到的 RevIN）可以帮助解决漂移问题
 
     feature_cols = [col for col in data.columns if col not in ['target_return'] and not col.startswith('mkt_feat_')]
     market_feature_cols = [col for col in data.columns if col.startswith('mkt_feat_')]
     target_col = 'target_return'
 
-    # Example: Cross-sectional Rank Normalization (QuantileTransformer mimics ranking)
+    # 示例: 横截面排名归一化（QuantileTransformer 模拟排名）
     def rank_normalize_group(group):
-        # Use Gaussian output for better behavior with linear models/losses
+        # 使用高斯输出以更好地适应线性模型/损失
         qt = QuantileTransformer(output_distribution='normal', random_state=42)
         group[feature_cols] = qt.fit_transform(group[feature_cols])
-        # Also rank normalize target for some loss functions (like Rank IC loss)
+        # 对某些损失函数（如 Rank IC 损失）也进行目标排名归一化
         # group[target_col] = qt.fit_transform(group[[target_col]])[:, 0]
         return group
 
     # data = data.groupby(level='date', group_keys=False).apply(rank_normalize_group)
-    print("Rank normalization applied (placeholder action).")
+    print("排名归一化已应用（占位操作）。")
 
 
-    # Example: Standardization (Subtract mean, divide by std) - Applied cross-sectionally
+    # 示例: 标准化（减去均值，除以标准差） - 横截面应用
     def standardize_group(group):
         scaler_feat = StandardScaler()
         scaler_mkt = StandardScaler()
         scaler_target = StandardScaler()
         group[feature_cols] = scaler_feat.fit_transform(group[feature_cols])
         group[market_feature_cols] = scaler_mkt.fit_transform(group[market_feature_cols])
-        # Standardize target as well for stable training
+        # 也对目标进行标准化以稳定训练
         group[target_col] = scaler_target.fit_transform(group[[target_col]])[:, 0]
         return group
 
     data = data.groupby(level='date', group_keys=False).apply(standardize_group)
-    print("Standardization applied.")
+    print("标准化已应用。")
 
-    # --- Neutralization (Optional but often helpful) ---
-    # TODO: Implement industry/market_cap neutralization if needed
-    # Requires regressing features on industry dummies/market cap factors and taking residuals
+    # --- 中性化（可选但通常有帮助） ---
+    # TODO: 如果需要，实施行业/市值中性化
+    # 需要对特征进行行业虚拟变量/市值因子回归并取残差
 
-    print(f"Preprocessing complete. Data shape: {data.shape}")
-    return data.dropna() # Drop NaNs again after potential transform issues
+    print(f"数据预处理完成。数据形状: {data.shape}")
+    return data.dropna() # 在潜在的转换问题后再次删除 NaN
 
 
-# --- Custom Dataset for Time Series ---
+# --- 时间序列的自定义数据集 ---
 class StockTimeSeriesDataset(Dataset):
     def __init__(self, data, stock_feature_cols, market_feature_cols, target_col, seq_len):
         self.data = data
@@ -229,33 +241,33 @@ class StockTimeSeriesDataset(Dataset):
         self.date_to_idx = {date: i for i, date in enumerate(self.unique_dates)}
         self.num_stocks_per_date = data.groupby(level='date').size()
 
-        # Precompute sequences for faster access (might use significant memory)
+        # 预计算序列以加快访问速度（可能使用大量内存）
         self.sequences = self._precompute_sequences()
 
     def _precompute_sequences(self):
-        print("Precomputing sequences...")
+        print("预计算序列...")
         sequences = []
         all_assets = self.data.index.get_level_values('asset').unique()
-        # Group data by asset for efficient time series slicing
+        # 按资产分组数据以高效地进行时间序列切片
         grouped_by_asset = self.data.reset_index().set_index('date').groupby('asset')
 
         for date_idx, current_date in enumerate(tqdm(self.unique_dates)):
             if date_idx < self.seq_len - 1:
-                continue # Not enough history
+                continue # 历史数据不足
 
             start_date_idx = date_idx - self.seq_len + 1
             start_date = self.unique_dates[start_date_idx]
 
-            # Get data for the current date
+            # 获取当前日期的数据
             current_data_slice = self.data.loc[current_date]
-            if isinstance(current_data_slice, pd.Series): # Handle single stock case
+            if isinstance(current_data_slice, pd.Series): # 处理单一股票情况
                  current_data_slice = current_data_slice.to_frame().T
             current_assets = current_data_slice.index
 
-            # Get market features for the sequence
-            mkt_seq = self.data.loc[start_date:current_date, self.market_feature_cols].iloc[0:self.seq_len].values # Assumes market features are duplicated across stocks
+            # 获取序列的市场特征
+            mkt_seq = self.data.loc[start_date:current_date, self.market_feature_cols].iloc[0:self.seq_len].values # 假设市场特征在股票间重复
 
-            # Get stock features and target for each asset present on the current date
+            # 获取当前日期存在的每个资产的股票特征和目标
             for asset in current_assets:
                 try:
                     asset_data = grouped_by_asset.get_group(asset)
@@ -269,9 +281,9 @@ class StockTimeSeriesDataset(Dataset):
                             'target': torch.tensor(target, dtype=torch.float32)
                         })
                 except KeyError:
-                    # Asset might not exist for the full sequence
+                    # 资产可能不存在完整的序列
                     continue
-        print(f"Precomputed {len(sequences)} sequences.")
+        print(f"预计算了 {len(sequences)} 个序列。")
         return sequences
 
 
@@ -283,11 +295,11 @@ class StockTimeSeriesDataset(Dataset):
 
 
 # ----------------------------------------------------------------------------
-# --- 5. Model Definition (Key Components) ---
+# --- 5. 模型定义（关键组件） ---
 # ----------------------------------------------------------------------------
 
 class MarketGatingUnit(nn.Module):
-    """Applies market context gating to stock features."""
+    """对股票特征应用市场上下文门控。"""
     def __init__(self, d_market_features, d_stock_features, gating_type='attention', beta=1.0, n_heads=4):
         super().__init__()
         self.gating_type = gating_type
@@ -295,136 +307,136 @@ class MarketGatingUnit(nn.Module):
         self.d_stock_features = d_stock_features
 
         if gating_type == 'linear':
-            # Linear projection from market features to stock feature weights
+            # 从市场特征到股票特征权重的线性投影
             self.market_to_weight = nn.Linear(d_market_features, d_stock_features)
             self.softmax = nn.Softmax(dim=-1)
         elif gating_type == 'attention':
-            # Use market features (averaged over time?) to query stock features
-            # Q: Market features, K: Market features, V: Stock features? Or Q: Stock, K: Market, V: Market?
-            # Let's follow report: Market features --> weights for stock features
-            # Q: Market, K: Dummy, V: Dummy -> gets weights; OR Market -> Linear -> weights
-            # A simpler attention: Market features generate Q, K; Stock features are V.
-            # Here, we interpret report's Fig 24: Market -> Linear -> Softmax -> Weights
-            # Let's implement *that* attention idea slightly differently:
-            # Use market context to modulate attention *within* the stock feature extractor later,
-            # OR implement the explicit gating weight generation via attention:
-            self.market_q = nn.Linear(d_market_features, d_stock_features) # Market features form query
-            self.stock_k = nn.Linear(d_stock_features, d_stock_features) # Stock features form key
+            # 使用市场特征（在时间上平均？）查询股票特征
+            # Q: 市场特征, K: 市场特征, V: 股票特征？或者 Q: 股票, K: 市场, V: 市场？
+            # 按报告：市场特征 -> 权重生成
+            # Q: 市场, K: Dummy, V: Dummy -> 获取权重；或者市场 -> 线性 -> 权重
+            # 简化的注意力：市场特征生成 Q, K；股票特征为 V。
+            # 这里，我们解释报告的图 24：市场 -> 线性 -> Softmax -> 权重
+            # 实现 *这种* 注意力的想法稍有不同：
+            # 使用市场上下文调制股票特征提取器中的注意力，
+            # 或通过注意力显式生成门控权重：
+            self.market_q = nn.Linear(d_market_features, d_stock_features) # 市场特征形成查询
+            self.stock_k = nn.Linear(d_stock_features, d_stock_features) # 股票特征形成键
             self.attention = nn.MultiheadAttention(d_stock_features, n_heads, batch_first=True, dropout=0.1)
-            # Output of attention could be weights, or used differently.
-            # Sticking closer to Fig 24's *linear* path first for clarity in the gating unit:
-            print("WARN: MarketGatingUnit attention type implementation is complex, using Linear for now.")
-            self.gating_type = 'linear' # Revert to linear for simpler example skeleton
+            # 注意力的输出可以是权重，也可以以其他方式使用。
+            # 更接近图 24 的 *线性* 路径以清晰地实现门控单元：
+            print("警告: MarketGatingUnit 注意力类型实现较复杂，目前使用线性实现。")
+            self.gating_type = 'linear' # 回退到线性以简化示例框架
             self.market_to_weight = nn.Linear(d_market_features, d_stock_features)
-            self.softmax = nn.Softmax(dim=-1) # Report uses Softmax(H_market / beta)
+            self.softmax = nn.Softmax(dim=-1) # 报告使用 Softmax(H_market / beta)
         else:
-            raise ValueError("Unknown gating type")
+            raise ValueError("未知门控类型")
 
     def forward(self, stock_features, market_features_seq):
-        # stock_features: (N, T, D_stock) or (N*T, D_stock) if flattened
-        # market_features_seq: (N, T, D_market) - market features over the sequence
-        # N: batch size (number of stocks on a given day), T: sequence length
+        # stock_features: (N, T, D_stock) 或 (N*T, D_stock) 如果展平
+        # market_features_seq: (N, T, D_market) - 时间序列上的市场特征
+        # N: 批量大小（给定日期的股票数量），T: 序列长度
 
-        # Use market features from the *last* time step as the current market context
-        market_context = market_features_seq[:, -1, :] # Shape: (N, D_market)
+        # 使用时间步的 *最后* 市场特征作为当前市场上下文
+        market_context = market_features_seq[:, -1, :] # 形状: (N, D_market)
 
         if self.gating_type == 'linear':
-            # Project market context to weights: (N, D_market) -> (N, D_stock)
+            # 投影市场上下文到权重: (N, D_market) -> (N, D_stock)
             market_weights = self.market_to_weight(market_context)
 
-            # Apply temperature beta and softmax
-            # Reshape weights to broadcast: (N, 1, D_stock) to multiply with (N, T, D_stock)
-            # Apply weights to the *last* stock feature representation? Or the whole sequence?
-            # Fig 24 implies weights (T x D_feature) applied to stock features (N x T x D_feature)
-            # Let's assume weights are applied to the *final* feature representation (after extractor)
-            # If applied *before* extractor:
-            # Need weights shape (N, 1, D_stock) or (N, T, D_stock)
-            # Let's try (N, 1, D_stock) applied to each step T.
-            market_weights = self.softmax(market_weights / self.beta) # Shape: (N, D_stock)
-            gating_weights = market_weights.unsqueeze(1) # Shape: (N, 1, D_stock)
+            # 应用温度 beta 和 softmax
+            # 重塑权重以广播: (N, 1, D_stock) 以与 (N, T, D_stock) 相乘
+            # 将权重应用于 *最后* 股票特征表示？或整个序列？
+            # 图 24 表示权重 (T x D_feature) 应用于股票特征 (N x T x D_feature)
+            # 假设权重应用于 *最终* 特征表示（提取器之后）
+            # 如果应用于 *提取器之前*：
+            # 需要权重形状 (N, 1, D_stock) 或 (N, T, D_stock)
+            # 尝试 (N, 1, D_stock) 应用于每个时间步 T。
+            market_weights = self.softmax(market_weights / self.beta) # 形状: (N, D_stock)
+            gating_weights = market_weights.unsqueeze(1) # 形状: (N, 1, D_stock)
 
-            # Apply gating: Element-wise multiplication
-            # Ensure stock_features has shape (N, T, D_stock)
+            # 应用门控: 元素乘法
+            # 确保 stock_features 形状为 (N, T, D_stock)
             gated_stock_features = stock_features * gating_weights
 
         elif self.gating_type == 'attention':
-            # TODO: Implement attention-based gating
-            # Query (from market), Key (from stock?), Value (stock)
-            # This needs careful design based on report's intent.
-            print("WARN: Attention gating not fully implemented in skeleton.")
-            gated_stock_features = stock_features # Pass through for now
+            # TODO: 实现基于注意力的门控
+            # 查询（来自市场），键（来自股票？），值（股票）
+            # 这需要根据报告的意图进行仔细设计。
+            print("警告: 注意力门控在框架中未完全实现。")
+            gated_stock_features = stock_features # 暂时通过
 
-        else: # No gating
+        else: # 无门控
              gated_stock_features = stock_features
 
         return gated_stock_features
 
 
 class FeatureExtractor(nn.Module):
-    """Extracts features using GRU or Multi-Level Attention."""
+    """使用 GRU 或多层注意力提取特征。"""
     def __init__(self, input_dim, d_model, extractor_type='attention', num_gru_layers=2, num_attention_layers=3, n_heads=4, dropout=0.1):
         super().__init__()
         self.extractor_type = extractor_type
         self.d_model = d_model
 
         if extractor_type == 'gru':
-            # Simple BiGRU baseline
+            # 简单的 BiGRU 基线
             self.gru = nn.GRU(input_dim, d_model // 2 if num_gru_layers > 0 else d_model,
                               num_layers=num_gru_layers, batch_first=True,
                               bidirectional=(num_gru_layers > 0), dropout=dropout if num_gru_layers > 1 else 0)
-            if num_gru_layers == 0: # Use a linear layer if no GRU layers
+            if num_gru_layers == 0: # 如果没有 GRU 层，则使用线性层
                  self.gru = nn.Linear(input_dim, d_model)
 
         elif extractor_type == 'attention':
-            # Simulate Master's 3-layer attention (conceptual)
-            # Layer 1: Intra-Stock Temporal Attention (Self-attention over time T)
-            # Layer 2: Inter-Stock Cross-Sectional Attention (Self-attention over stocks N) - Hard in batch! Needs careful padding/masking or alternative.
-            # Layer 3: Temporal Aggregation Attention (Attend to past steps for final output) - As per Fig 26
-            print("WARN: Multi-Level Attention is complex to implement correctly, using simplified Self-Attention.")
+            # 模拟硕士论文的三层注意力（概念性）
+            # 层 1: 股票时间序列内的注意力（时间 T 上的自注意力）
+            # 层 2: 股票间的横截面注意力（股票 N 上的自注意力） - 批量中较难！需要仔细的填充/掩码或替代方法。
+            # 层 3: 时间序列聚合注意力（关注过去步骤以获得最终输出） - 按图 26
+            print("警告: 多层注意力实现较复杂，使用简化的自注意力。")
             self.input_proj = nn.Linear(input_dim, d_model)
-            self.pos_encoder = PositionalEncoding(d_model, dropout) # Add positional encoding
+            self.pos_encoder = PositionalEncoding(d_model, dropout) # 添加位置编码
 
-            # Simplified: Use standard Transformer Encoder layers
+            # 简化: 使用标准 Transformer 编码器层
             encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_heads, dim_feedforward=d_model*2, dropout=dropout, batch_first=True)
             self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_attention_layers)
 
         else:
-            raise ValueError("Unknown extractor type")
+            raise ValueError("未知提取器类型")
 
     def forward(self, x):
-        # x shape: (N, T, D_input)
+        # x 形状: (N, T, D_input)
         if self.extractor_type == 'gru':
             if isinstance(self.gru, nn.GRU):
-                outputs, _ = self.gru(x) # outputs shape: (N, T, D_model)
-                # Use the output of the last time step
-                final_features = outputs[:, -1, :] # Shape: (N, D_model)
-            else: # Linear layer case
-                final_features = self.gru(x[:,-1,:]) # Apply linear to last time step
+                outputs, _ = self.gru(x) # outputs 形状: (N, T, D_model)
+                # 使用最后一个时间步的输出
+                final_features = outputs[:, -1, :] # 形状: (N, D_model)
+            else: # 线性层情况
+                final_features = self.gru(x[:,-1,:]) # 对最后一个时间步应用线性
 
         elif self.extractor_type == 'attention':
             x = self.input_proj(x)
             x = self.pos_encoder(x)
-            # Transformer expects (N, T, D_model)
-            # TODO: Implement masking if needed (e.g., for padding)
-            memory = self.transformer_encoder(x) # Shape: (N, T, D_model)
+            # Transformer 期望 (N, T, D_model)
+            # TODO: 如果需要，实施掩码（例如，用于填充）
+            memory = self.transformer_encoder(x) # 形状: (N, T, D_model)
 
-            # --- Temporal Aggregation (Simulating Layer 3 of Master) ---
-            # Use the last hidden state as Query, attend to all previous states (Keys/Values)
-            query = memory[:, -1:, :] # Shape: (N, 1, D_model)
-            keys_values = memory # Shape: (N, T, D_model)
-            # Simple weighted average based on attention scores (or use another MHA layer)
-            # Using dot product attention for simplicity here:
+            # --- 时间序列聚合（模拟硕士论文的层 3） ---
+            # 使用最后一个隐藏状态作为查询，关注所有之前的状态（键/值）
+            query = memory[:, -1:, :] # 形状: (N, 1, D_model)
+            keys_values = memory # 形状: (N, T, D_model)
+            # 基于注意力分数的简单加权平均（或使用另一个 MHA 层）
+            # 这里使用点积注意力以简化：
             attn_weights = torch.bmm(query, keys_values.transpose(1, 2)) # (N, 1, T)
             attn_weights = torch.softmax(attn_weights / (self.d_model**0.5), dim=-1)
             final_features = torch.bmm(attn_weights, keys_values).squeeze(1) # (N, D_model)
-            # Alternative: Just take the last output state
+            # 替代方法: 仅取最后一个输出状态
             # final_features = memory[:, -1, :]
 
-        return final_features # Shape: (N, D_model)
+        return final_features # 形状: (N, D_model)
 
 class PositionalEncoding(nn.Module):
-    # Standard Positional Encoding
-    # ... (Implementation omitted for brevity, standard PE formula) ...
+    # 标准位置编码
+    # ...（实现省略以简洁，标准 PE 公式）...
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -436,22 +448,22 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        """Args: x: Tensor, shape [batch_size, seq_len, embedding_dim]"""
-        x = x + self.pe[:x.size(1)].transpose(0,1) # Match batch_first=True format
+        """参数: x: Tensor, 形状 [batch_size, seq_len, embedding_dim]"""
+        x = x + self.pe[:x.size(1)].transpose(0,1) # 匹配 batch_first=True 格式
         return self.dropout(x)
 
 
 class StockPredictor(nn.Module):
-    """Main model combining gating and feature extraction."""
+    """结合门控和特征提取的主模型。"""
     def __init__(self, d_stock_features_in, d_market_features, config):
         super().__init__()
         self.use_market_gating = config["use_market_gating"]
         self.d_model = config["d_model"]
 
-        # 1. Optional Market Gating (applied *before* main feature extraction)
+        # 1. 可选的市场门控（在主要特征提取之前应用）
         if self.use_market_gating:
             self.market_gating = MarketGatingUnit(
-                d_market_features, d_stock_features_in, # Gate applied to input features
+                d_market_features, d_stock_features_in, # 门控应用于输入特征
                 gating_type=config["gating_type"],
                 beta=config["gating_beta"],
                 n_heads=config["n_heads"]
@@ -461,7 +473,7 @@ class StockPredictor(nn.Module):
             self.market_gating = None
             feature_extractor_input_dim = d_stock_features_in
 
-        # 2. Feature Extractor
+        # 2. 特征提取器
         self.feature_extractor = FeatureExtractor(
             input_dim=feature_extractor_input_dim,
             d_model=self.d_model,
@@ -472,48 +484,48 @@ class StockPredictor(nn.Module):
             dropout=config["dropout_rate"]
         )
 
-        # 3. Final Prediction Head
+        # 3. 最终预测头
         self.prediction_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.ReLU(),
             nn.Dropout(config["dropout_rate"]),
-            nn.Linear(self.d_model // 2, 1) # Predict single value (return)
+            nn.Linear(self.d_model // 2, 1) # 预测单值（收益）
         )
 
     def forward(self, stock_features_seq, market_features_seq):
         # stock_features_seq: (N, T, D_stock_in)
         # market_features_seq: (N, T, D_market)
 
-        # Apply gating first if enabled
+        # 首先应用门控（如果启用）
         if self.market_gating:
             gated_stock_features = self.market_gating(stock_features_seq, market_features_seq)
         else:
             gated_stock_features = stock_features_seq
 
-        # Extract features from (potentially gated) sequence
+        # 从（可能门控的）序列中提取特征
         final_stock_representation = self.feature_extractor(gated_stock_features) # (N, D_model)
 
-        # Predict
+        # 预测
         prediction = self.prediction_head(final_stock_representation) # (N, 1)
 
         return prediction.squeeze(-1) # (N,)
 
 
 # ----------------------------------------------------------------------------
-# --- 6. Training Loop ---
+# --- 6. 训练循环 ---
 # ----------------------------------------------------------------------------
 def train_model(model, train_loader, val_loader, config):
-    """Trains the PyTorch model."""
+    """训练 PyTorch 模型。"""
     model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"])
-    # Loss function: MSE is common, but IC-based losses are better for ranking factors
+    # 损失函数: MSE 常见，但基于 IC 的损失更适合因子排名
     # criterion = nn.MSELoss()
-    criterion = RankICLoss() # Placeholder for IC Loss (negative IC)
+    criterion = RankICLoss() # 因子 IC 损失的占位实现（负 IC）
 
     best_val_loss = float('inf')
     patience_counter = 0
 
-    print("Starting training...")
+    print("开始训练...")
     for epoch in range(config["epochs"]):
         model.train()
         train_loss = 0.0
@@ -532,7 +544,7 @@ def train_model(model, train_loader, val_loader, config):
 
         train_loss /= len(train_loader)
 
-        # Validation
+        # 验证
         model.eval()
         val_loss = 0.0
         val_preds = []
@@ -551,63 +563,63 @@ def train_model(model, train_loader, val_loader, config):
         val_loss /= len(val_loader)
         val_preds = np.concatenate(val_preds)
         val_targets = np.concatenate(val_targets)
-        # Calculate validation Rank IC
+        # 计算验证 Rank IC
         val_rank_ic = calculate_rank_ic(val_preds, val_targets)
 
 
         print(f"Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Rank IC: {val_rank_ic:.4f}")
 
-        # Early Stopping
+        # 提前停止
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            # Save best model checkpoint
+            # 保存最佳模型检查点
             torch.save(model.state_dict(), "best_model.pth")
-            print("Saved best model checkpoint.")
+            print("已保存最佳模型检查点。")
         else:
             patience_counter += 1
             if patience_counter >= config["early_stopping_patience"]:
-                print("Early stopping triggered.")
+                print("触发提前停止。")
                 break
 
-    print("Training finished.")
-    # Load best model weights
+    print("训练完成。")
+    # 加载最佳模型权重
     model.load_state_dict(torch.load("best_model.pth"))
     return model
 
-# --- Helper: IC Loss & Calculation ---
+# --- 辅助函数: IC 损失与计算 ---
 def calculate_rank_ic(y_pred, y_true):
-    """Calculates Spearman Rank Correlation Coefficient (Rank IC)."""
+    """计算 Spearman 排名相关系数（Rank IC）。"""
     if len(y_pred) < 2: return 0.0
     ranked_pred = pd.Series(y_pred).rank()
     ranked_true = pd.Series(y_true).rank()
     return np.corrcoef(ranked_pred, ranked_true)[0, 1]
 
 class RankICLoss(nn.Module):
-    """Approximation of Rank IC Loss (negative IC)."""
+    """Rank IC 损失的近似实现（负 IC）。"""
     def forward(self, y_pred, y_true):
-        # Center predictions and targets
+        # 中心化预测和目标
         pred_centered = y_pred - y_pred.mean()
         target_centered = y_true - y_true.mean()
-        # Calculate covariance and standard deviations
+        # 计算协方差和标准差
         cov = (pred_centered * target_centered).mean()
         pred_std = torch.sqrt((pred_centered**2).mean() + 1e-6)
         target_std = torch.sqrt((target_centered**2).mean() + 1e-6)
-        # Calculate Pearson correlation (approximates Rank IC for normally distributed ranks)
+        # 计算 Pearson 相关系数（对正态分布的排名近似 Rank IC）
         corr = cov / (pred_std * target_std)
-        # Return negative correlation (since we want to maximize IC)
+        # 返回负相关系数（因为我们希望最大化 IC）
         return -corr
 
 
 # ----------------------------------------------------------------------------
-# --- 7. Prediction / Factor Generation ---
+# --- 7. 预测 / 因子生成 ---
 # ----------------------------------------------------------------------------
 def generate_predictions(model, data_loader):
-    """Generates predictions using the trained model."""
+    """使用训练好的模型生成预测。"""
     model.eval()
     model.to(device)
     predictions = []
-    print("Generating predictions...")
+    print("生成预测...")
     with torch.no_grad():
         pred_pbar = tqdm(data_loader, desc="Predicting")
         for stock_seq, market_seq, _ in pred_pbar:
@@ -617,113 +629,113 @@ def generate_predictions(model, data_loader):
     return np.concatenate(predictions)
 
 # ----------------------------------------------------------------------------
-# --- 8. Factor Synthesis ---
+# --- 8. 因子综合 ---
 # ----------------------------------------------------------------------------
 def synthesize_factors(factors_dict, weights="equal"):
-    """Combines multiple factors into a composite factor."""
-    print("Synthesizing factors...")
+    """将多个因子合成为一个综合因子。"""
+    print("综合因子...")
     factor_df = pd.DataFrame(factors_dict)
 
     if weights == "equal":
-        # Simple equal weighting as baseline/report method
+        # 简单的等权重作为基线/报告方法
         composite_factor = factor_df.mean(axis=1)
     elif weights == "ml_based":
-        # TODO: Implement ML-based factor weighting (e.g., train a model to predict returns from factors)
-        print("WARN: ML-based synthesis not implemented.")
-        composite_factor = factor_df.mean(axis=1) # Fallback
+        # TODO: 实现基于机器学习的因子权重（例如，训练一个模型以从因子预测收益）
+        print("警告: 基于机器学习的综合未实现。")
+        composite_factor = factor_df.mean(axis=1) # 回退
     else:
-        raise ValueError("Unknown synthesis weights type")
+        raise ValueError("未知综合权重类型")
 
-    print("Factor synthesis complete.")
+    print("因子综合完成。")
     return composite_factor.rename("composite_factor")
 
 # ----------------------------------------------------------------------------
-# --- 9. Portfolio Construction & Backtesting ---
+# --- 9. 投资组合构建与回测 ---
 # ----------------------------------------------------------------------------
 def run_backtest(factor_series, stock_data, config):
-    """Runs the index enhancement backtest."""
-    print("Running backtest...")
-    # TODO: Implement portfolio optimization and backtesting logic
-    # 1. Align factor with stock data (dates, assets)
-    # 2. On each rebalance date:
-    #    a. Get current factor values for the stock universe
-    #    b. Get benchmark weights (e.g., CSI 1000 weights)
-    #    c. Get necessary data for constraints (industry, market cap/style factors)
-    #    d. Run optimizer (e.g., quadratic programming) to find target portfolio weights
-    #       - Objective: Maximize expected alpha (based on factor) or minimize tracking error
-    #       - Constraints: Turnover limit, industry limits, style limits, stock limits, etc.
-    # 3. Simulate trading based on target weights (calculate PnL, turnover, costs)
-    # 4. Calculate performance metrics (Sharpe, Info Ratio, Max Drawdown, Annual Return, Beta)
+    """运行指数增强回测。"""
+    print("运行回测...")
+    # TODO: 实现投资组合优化与回测逻辑
+    # 1. 将因子与股票数据对齐（日期，资产）
+    # 2. 在每个再平衡日期：
+    #    a. 获取当前股票池的因子值
+    #    b. 获取基准权重（例如，CSI 1000 权重）
+    #    c. 获取约束所需的数据（行业、市值/风格因子）
+    #    d. 运行优化器（例如，二次规划）以找到目标投资组合权重
+    #       - 目标: 最大化预期 alpha（基于因子）或最小化跟踪误差
+    #       - 约束: 换手率限制、行业限制、风格限制、股票限制等。
+    # 3. 根据目标权重模拟交易（计算 PnL、换手率、成本）
+    # 4. 计算绩效指标（夏普比率、信息比率、最大回撤、年化收益、Beta）
 
-    # Placeholder implementation:
-    print("Backtesting logic needs full implementation using a dedicated library or custom code.")
+    # 占位实现：
+    print("回测逻辑需要使用专用库或自定义代码进行完整实现。")
     performance_metrics = {
-        "Annualized Return": 0.15,
-        "Annualized Volatility": 0.20,
-        "Sharpe Ratio": 0.75,
-        "Max Drawdown": -0.25,
-        "Information Ratio": 2.0, # Placeholder - should be calculated vs benchmark
-        "Annualized Turnover": 0.50 # Placeholder
+        "年化收益": 0.15,
+        "年化波动率": 0.20,
+        "夏普比率": 0.75,
+        "最大回撤": -0.25,
+        "信息比率": 2.0, # 占位 - 应与基准计算
+        "年化换手率": 0.50 # 占位
     }
-    print("Backtest complete (placeholder).")
+    print("回测完成（占位实现）。")
     return performance_metrics
 
 # ----------------------------------------------------------------------------
-# --- 10. Main Execution Logic ---
+# --- 10. 主执行逻辑 ---
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # --- Load Base Data ---
+    # --- 加载基础数据 ---
     stock_data_full = load_stock_data(CONFIG["start_date"], CONFIG["test_end_date"], CONFIG["stock_universe_source"])
     market_features_full = load_market_features(CONFIG["market_index_codes"], CONFIG["start_date"], CONFIG["test_end_date"], CONFIG["market_feature_lookback"])
 
-    all_predictions = {} # Store predictions from different models/features
+    all_predictions = {} # 存储不同模型/特征的预测
 
-    # --- Iterate through chosen feature sets ---
+    # --- 遍历选定的特征集 ---
     for feature_set in CONFIG["feature_sets"]:
-        print(f"\n--- Processing Feature Set: {feature_set} ---")
+        print(f"\n--- 处理特征集: {feature_set} ---")
 
-        # 1. Calculate Features & Target
+        # 1. 计算特征与目标
         features = calculate_features(stock_data_full, feature_set)
         target_returns = calculate_forward_returns(stock_data_full, CONFIG["prediction_horizon"])
 
-        # 2. Preprocess Data
+        # 2. 数据预处理
         data = preprocess_data(features, market_features_full, target_returns)
-        del features, target_returns; gc.collect() # Free memory
+        del features, target_returns; gc.collect() # 释放内存
 
-        # --- Rolling Window Training & Prediction ---
-        # Determine rolling window start/end dates
+        # --- 滚动窗口训练与预测 ---
+        # 确定滚动窗口的起始/结束日期
         all_dates = data.index.get_level_values('date').unique().sort_values()
         test_dates = all_dates[all_dates >= pd.to_datetime(CONFIG["test_start_date"])]
 
-        # Store predictions for this feature set
+        # 存储此特征集的预测
         feature_set_predictions = pd.Series(index=data.loc[test_dates].index, dtype=float)
 
-        # Example: Simplified rolling loop (needs proper date handling)
-        # In practice, you'd loop through test periods (e.g., monthly, quarterly)
-        # and retrain the model on data up to that point.
-        print("Starting Rolling Window Simulation (Simplified)...")
+        # 示例: 简化的滚动循环（需要正确的日期处理）
+        # 实际中，您会循环测试期（例如，每月，每季度）
+        # 并在该点之前的数据上重新训练模型。
+        print("开始滚动窗口模拟（简化）...")
 
-        # Define train/val/test split for the first window
+        # 定义第一个窗口的训练/验证/测试分割
         train_data = data[ (data.index.get_level_values('date') >= pd.to_datetime(CONFIG["train_start_date"])) &
-                           (data.index.get_level_values('date') <= pd.to_datetime(CONFIG["train_end_date"])) ] # Adjust dates for rolling
-        val_data = train_data # Simplification: Use part of train or a separate period for validation
+                           (data.index.get_level_values('date') <= pd.to_datetime(CONFIG["train_end_date"])) ] # 根据滚动调整日期
+        val_data = train_data # 简化: 使用训练的一部分或单独的时期作为验证
         test_data_current_window = data[ (data.index.get_level_values('date') >= pd.to_datetime(CONFIG["test_start_date"])) &
                                          (data.index.get_level_values('date') <= pd.to_datetime(CONFIG["test_end_date"])) ]
 
 
-        # Create DataLoaders for the first window
+        # 为第一个窗口创建 DataLoader
         stock_cols = [c for c in data.columns if c.startswith(feature_set)]
         market_cols = [c for c in data.columns if c.startswith('mkt_feat_')]
         target_col = 'target_return'
 
         train_dataset = StockTimeSeriesDataset(train_data, stock_cols, market_cols, target_col, CONFIG["time_series_length"])
-        val_dataset = StockTimeSeriesDataset(val_data, stock_cols, market_cols, target_col, CONFIG["time_series_length"]) # Use validation split
+        val_dataset = StockTimeSeriesDataset(val_data, stock_cols, market_cols, target_col, CONFIG["time_series_length"]) # 使用验证分割
         test_dataset = StockTimeSeriesDataset(test_data_current_window, stock_cols, market_cols, target_col, CONFIG["time_series_length"])
 
 
-        # Ensure datasets are not empty
+        # 确保数据集不为空
         if len(train_dataset) == 0 or len(val_dataset) == 0 or len(test_dataset) == 0:
-             print(f"WARN: Dataset empty for feature set {feature_set}, skipping.")
+             print(f"警告: 数据集为空，特征集 {feature_set}，跳过。")
              continue
 
         train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=4, pin_memory=True)
@@ -731,78 +743,78 @@ if __name__ == "__main__":
         test_loader = DataLoader(test_dataset, batch_size=CONFIG["batch_size"] * 2, shuffle=False, num_workers=4, pin_memory=True)
 
 
-        # 3. Initialize Model
+        # 3. 初始化模型
         model = StockPredictor(
             d_stock_features_in=len(stock_cols),
             d_market_features=len(market_cols),
             config=CONFIG
         )
 
-        # 4. Train Model
+        # 4. 训练模型
         trained_model = train_model(model, train_loader, val_loader, CONFIG)
 
-        # 5. Generate Predictions for the test period of this window
-        # Need to map predictions back to the original multi-index (date, asset)
-        # The dataset output order needs to be preserved or mapped back.
-        # This part is tricky and depends heavily on the Dataset implementation.
-        # Assuming test_loader yields data corresponding to test_data_current_window.index:
+        # 5. 为此窗口的测试期生成预测
+        # 需要将预测映射回原始多索引（日期，资产）
+        # 数据集输出顺序需要保留或映射回。
+        # 这部分较复杂，强烈依赖于数据集的实现。
+        # 假设 test_loader 生成的数据与 test_data_current_window.index 对应：
         raw_predictions = generate_predictions(trained_model, test_loader)
 
-        # Map predictions back - Requires careful index handling from dataset
-        # This assumes the dataset preserves order matching test_data_current_window
-        # And that the length matches. This needs robust implementation.
+        # 映射预测回去 - 需要从数据集中仔细处理索引
+        # 假设数据集保留与 test_data_current_window 匹配的顺序
+        # 并且长度匹配。这需要稳健的实现。
         if len(raw_predictions) == len(test_dataset.sequences):
-             pred_index = [seq['original_index'] for seq in test_dataset.sequences] # Assumes dataset stores original index
-             feature_set_predictions.loc[pred_index] = raw_predictions # Assign predictions
+             pred_index = [seq['original_index'] for seq in test_dataset.sequences] # 假设数据集存储原始索引
+             feature_set_predictions.loc[pred_index] = raw_predictions # 分配预测
         else:
-             print(f"WARN: Prediction length mismatch for {feature_set}. Check Dataset/Loader.")
+             print(f"警告: 预测长度与 {feature_set} 不匹配。检查数据集/加载器。")
 
 
         all_predictions[f"{CONFIG['feature_extractor_type']}_{feature_set}_{CONFIG['gating_type'] if CONFIG['use_market_gating'] else 'nogate'}"] = feature_set_predictions.dropna()
-        print(f"Generated predictions for {feature_set}.")
+        print(f"已生成 {feature_set} 的预测。")
 
         del model, trained_model, train_loader, val_loader, test_loader, train_dataset, val_dataset, test_dataset, data
-        gc.collect() # Free memory between feature sets
+        gc.collect() # 在特征集之间释放内存
 
-        # --- End of simplified rolling loop ---
-        # A proper implementation would re-define train/val/test data for each test month/quarter
+        # --- 简化滚动循环结束 ---
+        # 正确的实现会为每个测试月/季度重新定义训练/验证/测试数据
 
-    # --- Add Base AI Factors (Placeholder) ---
-    print("Loading/Generating Base AI Factors (pv1, pv5, pv20)...")
-    # TODO: Load pre-computed factors or generate them using another model/method
+    # --- 添加基础 AI 因子（占位实现） ---
+    print("加载/生成基础 AI 因子（pv1, pv5, pv20）...")
+    # TODO: 加载预计算因子或使用其他模型/方法生成
     for factor_name in CONFIG["base_ai_factors"]:
-        # Dummy factors aligned with the test period index
-        test_period_index = pd.MultiIndex.from_tuples([]) # Get the actual test index
+        # 与测试期索引对齐的虚拟因子
+        test_period_index = pd.MultiIndex.from_tuples([]) # 获取实际测试索引
         if all_predictions:
              test_period_index = list(all_predictions.values())[0].index
         if not test_period_index.empty:
              all_predictions[factor_name] = pd.Series(np.random.randn(len(test_period_index)), index=test_period_index)
-             print(f"Added dummy factor: {factor_name}")
+             print(f"已添加虚拟因子: {factor_name}")
 
 
-    # --- Synthesize Factors ---
-    # Select the factors corresponding to the final strategy (e.g., all gated attention factors + base AI factors)
-    factors_to_synthesize = {k: v for k, v in all_predictions.items()} # Use all generated for example
+    # --- 综合因子 ---
+    # 选择最终策略对应的因子（例如，所有门控注意力因子 + 基础 AI 因子）
+    factors_to_synthesize = {k: v for k, v in all_predictions.items()} # 示例中使用所有生成的因子
     if not factors_to_synthesize:
-        print("ERROR: No factors generated for synthesis. Exiting.")
+        print("错误: 未生成因子用于综合。退出。")
         exit()
 
     composite_factor = synthesize_factors(factors_to_synthesize, weights=CONFIG["synthesis_weights"])
 
-    # --- Run Backtest ---
-    # Ensure factor index aligns with required stock data for backtesting period
+    # --- 运行回测 ---
+    # 确保因子索引与回测期所需的股票数据对齐
     backtest_stock_data = stock_data_full.loc[composite_factor.index.get_level_values('date').min():composite_factor.index.get_level_values('date').max()]
-    # Align factor dates/assets with available stock data for backtesting
+    # 将因子日期/资产与回测期的股票数据对齐
     aligned_factor, aligned_stock_data = composite_factor.align(backtest_stock_data['close'], join='inner', level=['date', 'asset'])
 
 
     if aligned_factor.empty:
-         print("ERROR: Factor alignment resulted in empty data. Cannot backtest.")
+         print("错误: 因子对齐导致数据为空。无法回测。")
     else:
-         performance = run_backtest(aligned_factor, backtest_stock_data, CONFIG) # Pass full stock data for constraints
+         performance = run_backtest(aligned_factor, backtest_stock_data, CONFIG) # 传递完整股票数据以满足约束
 
-         print("\n--- Backtest Performance ---")
+         print("\n--- 回测绩效 ---")
          for metric, value in performance.items():
              print(f"{metric}: {value:.4f}")
 
-    print("\n--- End of Script ---")
+    print("\n--- 脚本结束 ---")
